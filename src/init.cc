@@ -320,10 +320,10 @@ static ncclResult_t commAlloc(struct ncclComm* comm, struct ncclComm* parent, in
   CUDACHECK(cudaGetDevice(&comm->cudaDev));
 
   NCCLCHECK(getBusId(comm->cudaDev, &comm->busId));
-  nvmlDevice_t nvmlDev;
+  nvmlDevice_t nvmlDev = NULL;
   char busId[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
   NCCLCHECK(int64ToBusId(comm->busId, busId));
-  NCCLCHECK(ncclNvmlDeviceGetHandleByPciBusId(busId, &nvmlDev));
+  if (ncclNvmlDeviceGetHandleByPciBusId(busId, &nvmlDev) != ncclSuccess) nvmlDev = NULL
   NCCLCHECK(ncclNvmlDeviceGetIndex(nvmlDev, (unsigned int*)&comm->nvmlDev));
 
   comm->compCap = ncclCudaCompCap();
