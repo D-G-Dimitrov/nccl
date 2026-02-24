@@ -463,11 +463,15 @@ static ncclResult_t commAlloc(struct ncclComm* comm, struct ncclComm* parent, in
   NCCLCHECK(ncclCudaContextTrack(&comm->context));
 
   NCCLCHECK(getBusId(comm->cudaDev, &comm->busId));
-  nvmlDevice_t nvmlDev;
+  nvmlDevice_t nvmlDev = NULL;
   char busId[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
   NCCLCHECK(int64ToBusId(comm->busId, busId));
-  NCCLCHECK(ncclNvmlDeviceGetHandleByPciBusId(busId, &nvmlDev));
-  NCCLCHECK(ncclNvmlDeviceGetIndex(nvmlDev, (unsigned int*)&comm->nvmlDev));
+  if (ncclNvmlDeviceGetHandleByPciBusId(busId, &nvmlDev) != ncclSuccess) {
+    comm->nvmlDev = -1;
+    WARN("Failed to find nvml device for busId %s. This may affect performance.", busId);
+  }else{
+    NCCLCHECK(ncclNvmlDeviceGetIndex(nvmlDev, (unsigned int*)&comm->nvmlDev));
+  }
 
   comm->compCap = ncclCudaCompCap();
   TRACE(NCCL_INIT,"comm %p rank %d nranks %d cudaDev %d busId %lx compCap %d", comm, rank, ndev, comm->cudaDev, comm->busId, comm->compCap);
@@ -672,35 +676,37 @@ static ncclResult_t fillInfo(struct ncclComm* comm, struct ncclPeerInfo* info, u
   {
     // MNNVL: Request the fabric UUID and partition info
     char busId[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE];
-    nvmlDevice_t nvmlDev;
+    nvmlDevice_t nvmlDev = NULL;
     NCCLCHECK(int64ToBusId(info->busId, busId));
-    NCCLCHECK(ncclNvmlDeviceGetHandleByPciBusId(busId, &nvmlDev));
-    info->fabricInfo.state = NVML_GPU_FABRIC_STATE_NOT_SUPPORTED;
-    (void) ncclNvmlDeviceGetGpuFabricInfoV(nvmlDev, &info->fabricInfo);
-    if (info->fabricInfo.state != NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
-      unsigned long uuid0 = 0;
-      unsigned long uuid1 = 0;
-      if (ncclParamMNNVLUUID() != -1) {
-        unsigned long temp_uuid0 = (unsigned long)ncclParamMNNVLUUID();
-        unsigned long temp_uuid1 = (unsigned long)ncclParamMNNVLUUID();
-        memcpy(info->fabricInfo.clusterUuid, &temp_uuid0, sizeof(temp_uuid0));
-        memcpy(info->fabricInfo.clusterUuid + sizeof(temp_uuid0), &temp_uuid1, sizeof(temp_uuid1));
+    if (ncclNvmlDeviceGetHandleByPciBusId(busId, &nvmlDev) != ncclSuccess) {
+      info->fabricInfo.state = NVML_GPU_FABRIC_STATE_NOT_SUPPORTED;
+    }else {
+      (void) ncclNvmlDeviceGetGpuFabricInfoV(nvmlDev, &info->fabricInfo);
+      if (info->fabricInfo.state != NVML_GPU_FABRIC_STATE_NOT_SUPPORTED) {
+        unsigned long uuid0 = 0;
+        unsigned long uuid1 = 0;
+        if (ncclParamMNNVLUUID() != -1) {
+          unsigned long temp_uuid0 = (unsigned long)ncclParamMNNVLUUID();
+          unsigned long temp_uuid1 = (unsigned long)ncclParamMNNVLUUID();
+          memcpy(info->fabricInfo.clusterUuid, &temp_uuid0, sizeof(temp_uuid0));
+          memcpy(info->fabricInfo.clusterUuid + sizeof(temp_uuid0), &temp_uuid1, sizeof(temp_uuid1));
+        }
+        memcpy(&uuid0, info->fabricInfo.clusterUuid, sizeof(uuid0));
+        memcpy(&uuid1, info->fabricInfo.clusterUuid + sizeof(uuid0), sizeof(uuid1));
+        if (ncclParamMNNVLCliqueId() == -2) {
+          nvmlPlatformInfo_t platformInfo = { 0 };
+          NCCLCHECK(ncclNvmlDeviceGetPlatformInfo(nvmlDev, &platformInfo));
+          INFO(NCCL_INIT, "MNNVL rack serial %s slot %d tray %d hostId %d peerType %d moduleId %d",
+               platformInfo.chassisSerialNumber, platformInfo.slotNumber, platformInfo.trayIndex,
+               platformInfo.hostId, platformInfo.peerType, platformInfo.moduleId);
+          // Use a hash of the Rack serial number to partition the NVLD clique
+          info->fabricInfo.cliqueId = getHash(platformInfo.chassisSerialNumber, sizeof(platformInfo.chassisSerialNumber));
+        } else if (ncclParamMNNVLCliqueId() != -1) info->fabricInfo.cliqueId = ncclParamMNNVLCliqueId();
+        INFO(NCCL_INIT, "MNNVL busId 0x%lx fabric UUID %lx.%lx cliqueId 0x%x state %d healthMask 0x%x",
+             info->busId,
+             uuid0, uuid1,
+             info->fabricInfo.cliqueId, info->fabricInfo.state, info->fabricInfo.healthMask);
       }
-      memcpy(&uuid0, info->fabricInfo.clusterUuid, sizeof(uuid0));
-      memcpy(&uuid1, info->fabricInfo.clusterUuid + sizeof(uuid0), sizeof(uuid1));
-      if (ncclParamMNNVLCliqueId() == -2) {
-        nvmlPlatformInfo_t platformInfo = { 0 };
-        NCCLCHECK(ncclNvmlDeviceGetPlatformInfo(nvmlDev, &platformInfo));
-        INFO(NCCL_INIT, "MNNVL rack serial %s slot %d tray %d hostId %d peerType %d moduleId %d",
-             platformInfo.chassisSerialNumber, platformInfo.slotNumber, platformInfo.trayIndex,
-             platformInfo.hostId, platformInfo.peerType, platformInfo.moduleId);
-        // Use a hash of the Rack serial number to partition the NVLD clique
-        info->fabricInfo.cliqueId = getHash(platformInfo.chassisSerialNumber, sizeof(platformInfo.chassisSerialNumber));
-      } else if (ncclParamMNNVLCliqueId() != -1) info->fabricInfo.cliqueId = ncclParamMNNVLCliqueId();
-      INFO(NCCL_INIT, "MNNVL busId 0x%lx fabric UUID %lx.%lx cliqueId 0x%x state %d healthMask 0x%x",
-           info->busId,
-           uuid0, uuid1,
-           info->fabricInfo.cliqueId, info->fabricInfo.state, info->fabricInfo.healthMask);
     }
   }
 
